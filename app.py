@@ -35,42 +35,30 @@ else:
     if st.session_state.role == "admin":
         st.sidebar.title("🚀 АДМИН")
         menu = st.sidebar.radio("Меню", ["🆕 Новый рейс", "📜 Архив", "🚖 Водители", "Выход"])
-        
         if menu == "🆕 Новый рейс":
-            st.header("🚐 Управление рейсами")
             e_id = st.query_params.get("edit_id")
-            
-            # Подгрузка данных для редактирования
             if e_id and 'ed_data' not in st.session_state:
                 res = supabase.table("trips").select("*").eq("id", e_id).execute()
                 if res.data:
-                    st.session_state.ed_data = res.data[0]
-                    st.session_state.p_list = res.data[0]['passengers']
-            
+                    st.session_state.ed_data, st.session_state.p_list = res.data[0], res.data[0]['passengers']
             if 'p_list' not in st.session_state:
                 st.session_state.p_list = [{"name":"","phone":""}]
-
             for i, p in enumerate(st.session_state.p_list):
                 cx, cy, cz = st.columns([2, 2, 0.5])
-                # Ключи key должны быть уникальными и не меняться при перерисовке
                 st.session_state.p_list[i]["name"] = cx.text_input(f"Имя {i+1}", value=p["name"], key=f"pname_{i}")
                 st.session_state.p_list[i]["phone"] = cy.text_input(f"Тел {i+1}", value=p["phone"], key=f"pphone_{i}")
                 if cz.button("❌", key=f"rm_{i}"):
                     st.session_state.p_list.pop(i)
                     st.rerun()
-            
             if st.button("➕ Пассажир"):
                 st.session_state.p_list.append({"name":"","phone":""})
                 st.rerun()
-
             ex = st.session_state.get('ed_data')
             rt = st.text_area("📍 Маршрут", value=ex['route'] if ex else "")
             pr = st.number_input("💰 Цена", value=int(ex['price']) if ex else 4000)
-            
             dr_r = supabase.table("drivers").select("*").execute()
             dr_m = {f"{d['name']} ({d['car']})": d['id'] for d in dr_r.data}
             sl_d = st.selectbox("🚖 Водитель", options=list(dr_m.keys()))
-
             if st.button("💾 СОХРАНИТЬ", use_container_width=True):
                 dt = {"route":rt, "price":pr, "driver_id":dr_m[sl_d], "passengers":st.session_state.p_list, "status":"Новый"}
                 if e_id:
@@ -80,15 +68,10 @@ else:
                 else:
                     supabase.table("trips").insert(dt).execute()
                 st.session_state.p_list = [{"name":"","phone":""}]
-                st.success("Сохранено!")
                 st.rerun()
-
             st.subheader("📡 В работе")
             active_trips = supabase.table("trips").select("*, drivers(name)").eq("status", "Новый").execute()
-            for t in active
-
-
-_trips.data:
+            for t in active_trips.data:
                 ca, cb, cc = st.columns([4, 1, 1])
                 ca.write(f"🚩 {t['route']} | 🚖 {t['drivers']['name'] if t['drivers'] else '?'}")
                 if cb.button("📝", key=f"e_{t['id']}"):
@@ -98,7 +81,6 @@ _trips.data:
                 if cc.button("🗑️", key=f"d_{t['id']}"):
                     supabase.table("trips").delete().eq("id", t['id']).execute()
                     st.rerun()
-
         elif menu == "📜 Архив":
             res = supabase.table("trips").select("*, drivers(name)").eq("status", "Завершен").execute()
             if res.data:
@@ -108,11 +90,10 @@ _trips.data:
                     df['Водитель'] = df['drivers'].apply(lambda x: x['name'] if x else "Удален")
                     df['Пассажиры'] = df['passengers'].apply(lambda x: ", ".join([f"{p['name']} ({p['phone']})" for p in x]))
                     df[['created_at','route','Водитель','Пассажиры','price']].to_excel(output, index=False)
-                    st.download_button("Нажмите для загрузки", output.getvalue(), "otchet.xlsx")
+                    st.download_button("Загрузить", output.getvalue(), "otchet.xlsx")
                 for t in res.data:
                     with st.expander(f"{t['created_at'][:10]} | {t['route']}"):
                         for p in t['passengers']: st.write(f"👤 {p['name']} - {p['phone']}")
-
         elif menu == "🚖 Водители":
             with st.expander("➕ Добавить"):
                 n, c, l, p = st.text_input("Имя"), st.text_input("Авто"), st.text_input("Логин"), st.text_input("Пароль")
@@ -125,9 +106,8 @@ _trips.data:
                 if c2.button("❌", key=f"dr_{d['id']}"):
                     supabase.table("drivers").delete().eq("id", d['id']).execute()
                     st.rerun()
-
-    # --- ВОДИТЕЛЬ ---
     else:
+        # --- ВОДИТЕЛЬ ---
         st.sidebar.title("📱 ВОДИТЕЛЬ")
         dr_o = st.sidebar.radio("Меню", ["🆕 Заказы", "📜 История", "Выход"])
         if dr_o == "🆕 Заказы":
@@ -137,7 +117,7 @@ _trips.data:
                     for p in j['passengers']:
                         cn, cb = st.columns([3, 1])
                         cn.write(f"👤 {p['name']}\n{p['phone']}")
-                        cb.markdown(f'<a href="tel:{p["phone"]}"><button style="width:100%;background:#25D366;color:white;border:none;padding:5px;border-radius:5px;">📞 Звонок</button></a>', unsafe_allow_html=True)
+                        cb.markdown(f'<a href="tel:{p["phone"]}"><button style="width:100%;background:#25D366;color:white;border:none;padding:5px;border-radius:5px;">📞</button></a>', unsafe_allow_html=True)
                     if st.button("✅ ЗАВЕРШИТЬ", key=f"f_{j['id']}", use_container_width=True):
                         supabase.table("trips").update({"status":"Завершен"}).eq("id", j['id']).execute()
                         st.rerun()
@@ -147,7 +127,6 @@ _trips.data:
             for t in h.data:
                 with st.expander(f"{t['created_at'][:10]} | {t['route']}"):
                     for p in t['passengers']: st.write(f"👤 {p['name']} - {p['phone']}")
-
     if st.sidebar.button("🚪 Выйти"):
         st.session_state.auth = False
         st.rerun()
