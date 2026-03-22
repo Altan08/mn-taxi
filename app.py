@@ -3,10 +3,9 @@ from supabase import create_client, Client
 import pandas as pd
 
 # --- ТВОИ ДАННЫЕ ИЗ SUPABASE ---
-URL = "https://hixvwbjybjhyefbsojmm.supabase.co"
-KEY = "sb_publishable_dP5OZzMPQaLocvBe6iFxAw_oOvO8Xpm"
-
-supabase: Client = create_client(URL, KEY)
+SUPABASE_URL = "https://hixvwbjybjhyefbsojmm.supabase.co"
+SUPABASE_KEY = "sb_publishable_dP50ZzMPQaLocvBe6iFxAw_oOvO8Xpm"
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- ЛОГИКА ПРИЛОЖЕНИЯ ---
 st.set_page_config(page_title="Трансфер МН", layout="wide")
