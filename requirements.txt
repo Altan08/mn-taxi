@@ -1,4 +1,7 @@
 streamlit
 supabase
 pandas
-xlsxwriter
+openpyxl
+streamlit_folium
+folium
+geopy
