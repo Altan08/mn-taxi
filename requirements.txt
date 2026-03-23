@@ -1,6 +1,5 @@
 streamlit
 supabase
-httpx
 pandas
 openpyxl
 streamlit-folium
