@@ -6,32 +6,36 @@ from streamlit_folium import st_folium
 import folium
 from geopy.geocoders import Nominatim
 
-# 1. НАСТРОЙКИ ПОДКЛЮЧЕНИЯ
+# 1. ДАННЫЕ ПОДКЛЮЧЕНИЯ
 URL = "https://hixvwbjybjhyefbsojmm.supabase.co"
 KEY = "sb_publishable_dP50ZzMPQaLocvBe6iFxAw_oOvO8Xpm"
 
+# Функция подключения с защитой от "падения" приложения
 @st.cache_resource
-def get_supabase():
-    # Прямое создание клиента для стабильности на Render
+def init_connection():
     return create_client(URL, KEY)
 
-supabase = get_supabase()
+try:
+    supabase = init_connection()
+except Exception as e:
+    st.error("Ошибка связи с сервером. Пожалуйста, обновите страницу.")
+    st.stop()
 
 st.set_page_config(page_title="MN Transfer PRO | VOLGOGRAD", layout="wide")
 
 if 'auth' not in st.session_state:
     st.session_state.update({'auth': False, 'role': None, 'user_id': None})
 
-# Геокодинг (Поиск координат по адресу)
+# Геокодинг для карты
 def get_coords(address):
     try:
-        geolocator = Nominatim(user_agent="mn_transfer_final_v3")
+        geolocator = Nominatim(user_agent="mn_nomad_tech_final_fix")
         location = geolocator.geocode(address)
         if location: return [location.latitude, location.longitude]
     except: return None
     return None
 
-# --- ВХОД ---
+# --- АВТОРИЗАЦИЯ ---
 if not st.session_state.auth:
     st.title("🚕 MN Transfer PRO")
     c1, c2 = st.columns(2)
@@ -48,8 +52,8 @@ if not st.session_state.auth:
                 if res.data:
                     st.session_state.update({'auth': True, 'role': 'driver', 'user_id': res.data[0]['id']})
                     st.rerun()
-                else: st.error("Ошибка входа")
-            except: st.error("Проблема с базой данных")
+                else: st.error("Неверный логин или пароль")
+            except: st.error("Сервер Supabase временно недоступен. Попробуйте еще раз через минуту.")
 
 else:
     # --- ИНТЕРФЕЙС АДМИНИСТРАТОРА ---
@@ -60,7 +64,7 @@ else:
         if menu == "🆕 Новый рейс":
             st.header("Управление рейсами")
             
-            # Редактирование
+            # Логика редактирования
             e_id = st.query_params.get("edit_id")
             if e_id and 'ed_load' not in st.session_state:
                 res = supabase.table("trips").select("*").eq("id", e_id).execute()
@@ -84,61 +88,71 @@ else:
                 st.rerun()
 
             ex = st.session_state.get('ed_load')
-            rt = st.text_area("📍 Маршрут (укажите Волгоград для карты)", value=ex['route'] if ex else "")
+            rt = st.text_area("📍 Маршрут", value=ex['route'] if ex else "")
             pr = st.number_input("💰 Цена", value=int(ex['price']) if ex else 4000)
             
-            dr_data = supabase.table("drivers").select("*").execute()
-            dr_m = {f"{d['name']} ({d['car']})": d['id'] for d in dr_data.data}
-            sl_d = st.selectbox("🚖 Водитель", options=list(dr_m.keys()))
+            try:
+                dr_data = supabase.table("drivers").select("*").execute()
+                dr_m = {f"{d['name']} ({d['car']})": d['id'] for d in dr_data.data}
+                sl_d = st.selectbox("🚖 Водитель", options=list(dr_m.keys()))
+            except:
+                st.warning("Не удалось загрузить список водителей")
+                sl_d = None
 
             if st.button("💾 СОХРАНИТЬ РЕЙС", use_container_width=True):
-                payload = {"route":rt, "price":pr, "driver_id":dr_m[sl_d], "passengers":st.session_state.p_list, "status":"Новый"}
-                if e_id:
-                    supabase.table("trips").update(payload).eq("id", e_id).execute()
-                    st.query_params.clear()
-                    if 'ed_load' in st.session_state: del st.session_state.ed_load
-                else:
-                    supabase.table("trips").insert(payload).execute()
-                st.session_state.p_list = [{"name":"","phone":""}]
-                st.rerun()
+                if sl_d:
+                    payload = {"route":rt, "price":pr, "driver_id":dr_m[sl_d], "passengers":st.session_state.p_list, "status":"Новый"}
+                    if e_id:
+                        supabase.table("trips").update(payload).eq("id", e_id).execute()
+                        st.query_params.clear()
+                        if 'ed_load' in st.session_state: del st.session_state.ed_load
+                    else:
+                        supabase.table("trips").insert(payload).execute()
+                    st.session_state.p_list = [{"name":"","phone":""}]
+                    st.rerun()
 
             st.subheader("📡 В работе")
-            act = supabase.table("trips").select("*, drivers(name)").eq("status", "Новый").execute()
-            for t in act.data:
-                ca, cb, cc = st.columns([4, 1, 1])
-                ca.write(f"🚩 {t['route']} | 🚖 {t['drivers']['name'] if t['drivers'] else '?'}")
-                if cb.button("📝", key=f"ed_btn_{t['id']}"):
-                    st.query_params.edit_id = t['id']
-                    if 'ed_load' in st.session_state: del st.session_state.ed_load
-                    st.rerun()
-                if cc.button("🗑️", key=f"del_{t['id']}"):
-                    supabase.table("trips").delete().eq("id", t['id']).execute()
-                    st.rerun()
+            try:
+                act = supabase.table("trips").select("*, drivers(name)").eq("status", "Новый").execute()
+                for t in act.data:
+                    ca, cb, cc = st.columns([4, 1, 1])
+                    ca.write(f"🚩 {t['route']} | 🚖 {t['drivers']['name'] if t['drivers'] else '?'}")
+                    if cb.button("📝", key=f"ed_btn_{t['id']}"):
+                        st.query_params.edit_id = t['id']
+                        if 'ed_load' in st.session_state: del st.session_state.ed_load
+                        st.rerun()
+                    if cc.button("🗑️", key=f"del_{t['id']}"):
+                        supabase.table("trips").delete().eq("id", t['id']).execute()
+                        st.rerun()
+            except: st.info("Активных рейсов не найдено")
 
         elif menu == "🗺️ Карта Волгограда":
-            st.header("📍 Метки пассажиров (Волгоград)")
-            active = supabase.table("trips").select("*").eq("status", "Новый").execute()
-            # Координаты центра Волгограда
-            m = folium.Map(location=[48.7080, 44.5133], zoom_start=11)
-            for t in active.data:
-                coords = get_coords(t['route'])
-                if coords:
-                    folium.Marker(coords, popup=f"{t['route']}\n{t['price']}₽").add_to(m)
-            st_folium(m, width="100%", height=600)
+            st.header("📍 Метки в Волгограде")
+            try:
+                active = supabase.table("trips").select("*").eq("status", "Новый").execute()
+                m = folium.Map(location=[48.7080, 44.5133], zoom_start=11)
+                for t in active.data:
+                    coords = get_coords(t['route'])
+                    if coords:
+                        folium.Marker(coords, popup=f"{t['route']}").add_to(m)
+                st_folium(m, width="100%", height=600)
+            except: st.error("Не удалось загрузить карту")
 
         elif menu == "📜 Архив":
-            res = supabase.table("trips").select("*, drivers(name)").eq("status", "Завершен").execute()
-            if res.data:
-                if st.button("📊 ЭКСПОРТ В EXCEL"):
-                    output = BytesIO()
-                    df = pd.DataFrame(res.data)
-                    df['Водитель'] = df['drivers'].apply(lambda x: x['name'] if x else "Удален")
-                    df['Пассажиры'] = df['passengers'].apply(lambda x: ", ".join([f"{p['name']} ({p['phone']})" for p in x]))
-                    df[['created_at','route','Водитель','Пассажиры','price']].to_excel(output, index=False)
-                    st.download_button("Скачать отчет", output.getvalue(), "archive.xlsx")
-                for t in res.data:
-                    with st.expander(f"{t['created_at'][:10]} | {t['route']}"):
-                        for p in t['passengers']: st.write(f"👤 {p['name']} - {p['phone']}")
+            try:
+                res = supabase.table("trips").select("*, drivers(name)").eq("status", "Завершен").execute()
+                if res.data:
+                    if st.button("📊 EXCEL"):
+                        output = BytesIO()
+                        df = pd.DataFrame(res.data)
+                        df['Водитель'] = df['drivers'].apply(lambda x: x['name'] if x else "Удален")
+                        df['Пассажиры'] = df['passengers'].apply(lambda x: ", ".join([f"{p['name']} ({p['phone']})" for p in x]))
+                        df[['created_at','route','Водитель','Пассажиры','price']].to_excel(output, index=False)
+                        st.download_button("Скачать отчет", output.getvalue(), "otchet.xlsx")
+                    for t in res.data:
+                        with st.expander(f"{t['created_at'][:10]} | {t['route']}"):
+                            for p in t['passengers']: st.write(f"👤 {p['name']} - {p['phone']}")
+            except: st.info("Архив пуст")
 
         elif menu == "🚖 Водители":
             with st.expander("➕ Новый водитель"):
@@ -146,40 +160,45 @@ else:
                 if st.button("ОК"):
                     supabase.table("drivers").insert({"name":n,"car":c,"login":l,"password":p}).execute()
                     st.rerun()
-            for d in supabase.table("drivers").select("*").execute().data:
-                c1, c2 = st.columns([5, 1])
-                c1.write(f"👤 {d['name']} | {d['car']}")
-                if c2.button("❌", key=f"dr_{d['id']}"):
-                    supabase.table("drivers").delete().eq("id", d['id']).execute()
-                    st.rerun()
+            try:
+                for d in supabase.table("drivers").select("*").execute().data:
+                    c1, c2 = st.columns([5, 1])
+                    c1.write(f"👤 {d['name']} | {d['car']}")
+                    if c2.button("❌", key=f"dr_{d['id']}"):
+                        supabase.table("drivers").delete().eq("id", d['id']).execute()
+                        st.rerun()
+            except: pass
 
-    # --- ВОДИТЕЛЬ ---
+    # --- ИНТЕРФЕЙС ВОДИТЕЛЯ ---
     else:
         st.sidebar.title("📱 ВОДИТЕЛЬ")
         dr_o = st.sidebar.radio("Меню", ["🆕 Заказы", "📜 История", "Выход"])
         if dr_o == "🆕 Заказы":
-            jobs = supabase.table("trips").select("*").eq("driver_id", st.session_state.user_id).eq("status", "Новый").execute()
-            if jobs.data:
-                for j in jobs.data:
-                    with st.container(border=True):
-                        st.subheader(f"🚩 {j['route']}")
-                        st.write(f"💰 Оплата: {j['price']} ₽")
-                        for p in j['passengers']:
-                            cn, cb = st.columns([3, 1])
-                            cn.write(f"👤 {p['name']}\n📞 {p['phone']}")
-                            # ЗЕЛЕНАЯ КНОПКА ЗВОНКА
-                            cb.markdown(f'<a href="tel:{p["phone"]}"><button style="width:100%;background:#25D366;color:white;border:none;padding:10px;border-radius:5px;cursor:pointer;">📞</button></a>', unsafe_allow_html=True)
-                        if st.button("✅ ЗАВЕРШИТЬ РЕЙС", key=f"fin_{j['id']}", use_container_width=True):
-                            supabase.table("trips").update({"status":"Завершен"}).eq("id", j['id']).execute()
-                            st.rerun()
-            else: st.info("Активных заказов нет")
+            try:
+                jobs = supabase.table("trips").select("*").eq("driver_id", st.session_state.user_id).eq("status", "Новый").execute()
+                if jobs.data:
+                    for j in jobs.data:
+                        with st.container(border=True):
+                            st.subheader(f"🚩 {j['route']}")
+                            st.write(f"💰 Оплата: {j['price']} ₽")
+                            for p in j['passengers']:
+                                cn, cb = st.columns([3, 1])
+                                cn.write(f"👤 {p['name']}\n📞 {p['phone']}")
+                                cb.markdown(f'<a href="tel:{p["phone"]}"><button style="width:100%;background:#25D366;color:white;border:none;padding:10px;border-radius:5px;cursor:pointer;">📞</button></a>', unsafe_allow_html=True)
+                            if st.button("✅ ЗАВЕРШИТЬ", key=f"fin_{j['id']}", use_container_width=True):
+                                supabase.table("trips").update({"status":"Завершен"}).eq("id", j['id']).execute()
+                                st.rerun()
+                else: st.info("Нет активных заказов")
+            except: st.error("Ошибка обновления списка")
 
         elif dr_o == "📜 История":
-            h = supabase.table("trips").select("*").eq("driver_id", st.session_state.user_id).eq("status", "Завершен").execute()
-            st.metric("Доход за всё время", f"{sum(i['price'] for i in h.data)} ₽")
-            for t in h.data:
-                with st.expander(f"{t['created_at'][:10]} | {t['route']}"):
-                    for p in t['passengers']: st.write(f"👤 {p['name']} - {p['phone']}")
+            try:
+                h = supabase.table("trips").select("*").eq("driver_id", st.session_state.user_id).eq("status", "Завершен").execute()
+                st.metric("Доход", f"{sum(i['price'] for i in h.data)} ₽")
+                for t in h.data:
+                    with st.expander(f"{t['created_at'][:10]} | {t['route']}"):
+                        for p in t['passengers']: st.write(f"👤 {p['name']} - {p['phone']}")
+            except: pass
 
     if st.sidebar.button("🚪 Выйти"):
         st.session_state.auth = False
