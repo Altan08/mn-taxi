@@ -219,7 +219,7 @@ def admin_page():
             # Простой вывод архива
             archived = load_trips(status="Завершен")
             for a in archived:
-                with ui.expander(f"{a['created_at'][:10]} | {a['route']}"):
+                with ui.expansion(f"{a['created_at'][:10]} | {a['route']}"):
                     ui.label(f"Цена: {a['price']} ₽")
                     ui.label(f"Пассажиры: {json.dumps(a['passengers'], ensure_ascii=False)}")
 
@@ -227,7 +227,7 @@ def admin_page():
         with ui.tab_panel(t5):
             ui.label('Управление персоналом').classes('text-h6 q-mb-md')
             
-            with ui.expander("➕ Зарегистрировать водителя"):
+            with ui.expansion("➕ Зарегистрировать водителя"):
                 n, c, l, p = ui.input("Имя"), ui.input("Авто"), ui.input("Логин"), ui.input("Пароль")
                 def add_dr():
                     supabase.table("drivers").insert({"name":n.value,"car":c.value,"login":l.value,"password":p.value}).execute()
@@ -290,7 +290,7 @@ def driver_page():
             h = load_trips(status="Завершен", driver_id=uid)
             ui.metric("Выручка всего", f"{sum(i['price'] for i in h)} ₽")
             for t in h:
-                with ui.expander(f"{t['created_at'][:10]} | {t['route']}"):
+                with ui.expansion(f"{t['created_at'][:10]} | {t['route']}"):
                     ui.label(f"Оплата: {t['price']} ₽")
 
 # --- ЗАПУСК НА RAILWAY (ЧИТАЕТ ПОРТ ИЗ ПЕРЕМЕННЫХ) ---
