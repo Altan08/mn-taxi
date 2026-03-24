@@ -1,7 +1,6 @@
-streamlit
+nicegui
 supabase
 pandas
 openpyxl
-streamlit-folium
-folium
 geopy
+folium
