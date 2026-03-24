@@ -5,14 +5,14 @@ from io import BytesIO
 from geopy.geocoders import Nominatim
 import folium
 import json
+import os
 
 # --- 1. КОНФИГУРАЦИЯ И ПОДКЛЮЧЕНИЕ ---
 URL = "https://hixvwbjybjhyefbsojmm.supabase.co"
 KEY = "sb_publishable_dP50ZzMPQaLocvBe6iFxAw_oOvO8Xpm"
 supabase: Client = create_client(URL, KEY)
 
-# Глобальное состояние сессии (аналог st.session_state)
-# Хранится в оперативной памяти сервера Railway
+# Глобальное состояние сессии
 session = {'auth': False, 'role': None, 'user_id': None, 'passengers': []}
 
 def get_coords(address):
@@ -60,7 +60,6 @@ class PassengerManager:
             ui.label('Список пассажиров').classes('text-lg q-mb-sm')
             for i, p in enumerate(self.passengers):
                 with ui.row().classes('w-full items-center justify-between q-mb-xs'):
-                    # Обновляем данные напрямую при вводе
                     ui.input(label=f'Имя {i+1}', value=p['name'], 
                              on_change=lambda e, idx=i: self.update_data(idx, 'name', e.value)).classes('col-5')
                     ui.input(label=f'Тел {i+1}', value=p['phone'],
@@ -83,7 +82,6 @@ class VolgogradMap:
 
     def draw(self):
         trips = load_trips(status="Новый")
-        # Центр Волгограда
         m = folium.Map(location=[48.7080, 44.5133], zoom_start=11)
         for t in trips:
             coords = get_coords(t['route'])
@@ -112,12 +110,12 @@ def login_page():
                         ui.navigate.to('/driver')
                     else:
                         ui.notify('Неверный логин или пароль!', color='negative')
-                except:
-                    ui.notify('Ошибка сети, попробуйте позже', color='warning')
+                except Exception as e:
+                    ui.notify(f'Ошибка сети: {e}', color='warning')
 
         ui.button('ВОЙТИ', on_click=do_login).classes('w-full q-mt-lg')
 
-# --- ПАНЕЛЬ АДМИНИСТРАТОРА (ВЕСЬ ФАРШ) ---
+# --- ПАНЕЛЬ АДМИНИСТРАТОРА ---
 @ui.page('/admin')
 def admin_page():
     if not session['auth'] or session['role'] != 'admin': ui.navigate.to('/')
@@ -148,91 +146,104 @@ def admin_page():
                         ui.label(f"💰 {t['price']}₽").classes('text-h6 text-green')
                     ui.label(f"🚖 Водитель: {t['drivers']['name'] if t['drivers'] else '?'}")
                     
-                    # Обработка вложенных пассажиров
                     passengers = t['passengers'] if t['passengers'] else []
                     with ui.expansion(f"👤 Пассажиры ({len(passengers)})"):
                         for p in passengers:
                             ui.label(f"{p['name']} - {p['phone']}")
 
                     with ui.row().classes('w-full q-mt-sm justify-end'):
-                        # Логика удаления (NiceGUI не перезагружает страницу)
                         def delete_trip(tid=t['id']):
                             supabase.table("trips").delete().eq("id", tid).execute()
                             ui.notify(f'Рейс удален!')
-                            ui.navigate.to('/admin') # Перезагрузка таба
+                            ui.navigate.to('/admin') 
 
                         ui.button(icon='delete', on_click=delete_trip).props('flat color=negative')
 
-        # --- ТАБ 2: СОЗДАНИЕ РЕЙСА (CRUD + ДИНАМИЧЕСКИЕ ПАССАЖИРЫ) ---
+        # --- ТАБ 2: СОЗДАНИЕ РЕЙСА ---
         with ui.tab_panel(t2):
             ui.label('Форма создания заказа').classes('text-h6 q-mb-md')
             route = ui.textarea('📍 Маршрут (укажите Волгоград...)').classes('w-full')
             price = ui.number('💰 Цена (₽)', value=4000).classes('w-full')
             
-            # Загрузка водителей для ui.select
             drivers = load_drivers()
             dr_options = {d['id']: d['name'] for d in drivers}
             dr_select = ui.select(dr_options, label='🚖 Назначить водителя').classes('w-full')
 
-            # Инициализация менеджера пассажиров
             passenger_manager = PassengerManager()
 
             def save_trip():
-                # Сбор данных
-                payload = {
-                    "route": route.value,
-                    "price": int(price.value),
-                    "driver_id": dr_select.value,
-                    "status": "Новый",
-                    "passengers": passenger_manager.get_data() # JSON-данные пассажиров
-                }
-                supabase.table("trips").insert(payload).execute()
-                ui.notify('Рейс успешно синхронизирован с базой!', color='positive')
-                ui.navigate.to('/admin') # Вернуться к списку
+                try:
+                    if not route.value or not dr_select.value:
+                        ui.notify('⚠️ Заполните маршрут и выберите водителя!', color='warning')
+                        return
+                    
+                    payload = {
+                        "route": str(route.value),
+                        "price": int(price.value or 0),
+                        "driver_id": dr_select.value,
+                        "status": "Новый",
+                        "passengers": passenger_manager.get_data()
+                    }
+                    supabase.table("trips").insert(payload).execute()
+                    ui.notify('✅ Рейс успешно создан!', color='positive')
+                    ui.navigate.to('/admin') 
+                except Exception as e:
+                    ui.notify(f'❌ Ошибка БД: {e}', color='negative')
 
             ui.button('💾 СОХРАНИТЬ И ОПУБЛИКОВАТЬ', on_click=save_trip).classes('w-full q-mt-lg')
 
-        # --- ТАБ 3: КАРТА (ИНТЕРАКТИВ + ГЕОКОДИНГ) ---
+        # --- ТАБ 3: КАРТА ---
         with ui.tab_panel(t3):
             ui.label('Геолокация активных заказов').classes('text-h6 q-mb-md')
-            VolgogradMap() # Вызов компонента карты
+            VolgogradMap()
 
         # --- ТАБ 4: АРХИВ + EXCEL ---
         with ui.tab_panel(t4):
             ui.label('История завершенных поездок').classes('text-h6 q-mb-md')
             
-            # Функция экспорта (в NiceGUI через API-роут)
             def export_excel():
                 data = load_trips(status="Завершен")
                 if not data: ui.notify('Архив пуст'); return
                 df = pd.DataFrame(data)
-                # ОбработкаJSON для Excel
                 df['Водитель'] = df['drivers'].apply(lambda x: x['name'] if x else "?")
                 df['Пассажиры'] = df['passengers'].apply(lambda x: ", ".join([f"{p['name']} ({p['phone']})" for p in x]))
                 output = BytesIO()
                 df[['created_at','route','Водитель','Пассажиры','price']].to_excel(output, index=False)
-                # Скачивание файла в NiceGUI
                 ui.download(output.getvalue(), 'archive.xlsx')
             
             ui.button('📊 СКАЧАТЬ EXCEL ОТЧЕТ', on_click=export_excel).classes('w-full q-mb-md')
 
-            # Простой вывод архива
             archived = load_trips(status="Завершен")
             for a in archived:
                 with ui.expansion(f"{a['created_at'][:10]} | {a['route']}"):
                     ui.label(f"Цена: {a['price']} ₽")
                     ui.label(f"Пассажиры: {json.dumps(a['passengers'], ensure_ascii=False)}")
 
-        # --- ТАБ 5: ВОДИТЕЛИ (CRUD) ---
+        # --- ТАБ 5: ВОДИТЕЛИ ---
         with ui.tab_panel(t5):
             ui.label('Управление персоналом').classes('text-h6 q-mb-md')
             
             with ui.expansion("➕ Зарегистрировать водителя"):
                 n, c, l, p = ui.input("Имя"), ui.input("Авто"), ui.input("Логин"), ui.input("Пароль")
                 def add_dr():
-                    supabase.table("drivers").insert({"name":n.value,"car":c.value,"login":l.value,"password":p.value}).execute()
-                    ui.navigate.to('/admin')
-                ui.button("ОК", on_click=add_dr)
+                    try:
+                        if not n.value or not l.value or not p.value:
+                            ui.notify('⚠️ Имя, логин и пароль обязательны!', color='warning')
+                            return
+
+                        payload = {
+                            "name": n.value,
+                            "car": c.value,
+                            "login": l.value,
+                            "password": p.value
+                        }
+                        supabase.table("drivers").insert(payload).execute()
+                        ui.notify('✅ Водитель добавлен!', color='positive')
+                        ui.navigate.to('/admin')
+                    except Exception as e:
+                        ui.notify(f'❌ Ошибка добавления: {e}', color='negative')
+                
+                ui.button("ОК", on_click=add_dr).classes('q-mt-md')
 
             d_list = load_drivers()
             for d in d_list:
@@ -241,7 +252,7 @@ def admin_page():
                         ui.label(f"👤 {d['name']} | {d['car']}")
                         ui.button(icon='delete', on_click=lambda did=d['id']: supabase.table("drivers").delete().eq("id", did).execute() or ui.navigate.to('/admin')).props('flat color=negative')
 
-# --- КАБИНЕТ ВОДИТЕЛЯ (ВЕСЬ ФАРШ + ЗВОНКИ) ---
+# --- КАБИНЕТ ВОДИТЕЛЯ ---
 @ui.page('/driver')
 def driver_page():
     if not session['auth'] or session['role'] != 'driver': ui.navigate.to('/')
@@ -257,7 +268,6 @@ def driver_page():
 
     with ui.tab_panels(tabs, value=t1).classes('w-full p-4'):
         
-        # --- ТАБ 1: МОИ ЗАКАЗЫ (КАРТОЧКИ + ЗВОНКИ) ---
         with ui.tab_panel(t1):
             ui.label('Активные рейсы').classes('text-h6 q-mb-md')
             my_jobs = load_trips(status="Новый", driver_id=uid)
@@ -274,17 +284,15 @@ def driver_page():
                     for p in passengers:
                         with ui.row().classes('w-full items-center justify-between border-b p-1'):
                             ui.label(f"👤 {p['name']}\n📞 {p['phone']}")
-                            # ИНТЕРАКТИВНАЯ ЗЕЛЕНАЯ КНОПКА ЗВОНКА (ЧЕРЕЗ HTML)
                             ui.html(f'<a href="tel:{p["phone"]}"><button style="width:50px;height:50px;background:#25D366;color:white;border:none;padding:10px;border-radius:50%;cursor:pointer;font-size:20px;">📞</button></a>')
 
                     def finish_trip(jid=j['id']):
                         supabase.table("trips").update({"status": "Завершен"}).eq("id", jid).execute()
-                        ui.notify('Рейс завершен, спасибо!')
+                        ui.notify('Рейс завершен, спасибо!', color='positive')
                         ui.navigate.to('/driver')
 
                     ui.button('✅ ЗАВЕРШИТЬ РЕЙС', on_click=finish_trip).classes('w-full q-mt-md bg-green text-white')
 
-        # --- ТАБ 2: МОЯ ИСТОРИЯ ---
         with ui.tab_panel(t2):
             ui.label('Завершенные рейсы').classes('text-h6 q-mb-md')
             h = load_trips(status="Завершен", driver_id=uid)
@@ -293,7 +301,6 @@ def driver_page():
                 with ui.expansion(f"{t['created_at'][:10]} | {t['route']}"):
                     ui.label(f"Оплата: {t['price']} ₽")
 
-# --- ЗАПУСК НА RAILWAY (ЧИТАЕТ ПОРТ ИЗ ПЕРЕМЕННЫХ) ---
-import os
+# --- ЗАПУСК ---
 port = int(os.environ.get("PORT", 8080))
-ui.run(port=port, host='0.0.0.0', title="MN Transfer PRO", favicon="🚕")
+ui.run(port=port, host='0.0.0.0', title="NOMAD TECH", favicon="🚕")
