@@ -24,7 +24,7 @@ def init_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS clients 
                       (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, phone TEXT UNIQUE, trips_count INTEGER DEFAULT 0)''')
     
-    # Проверка на наличие колонки trips_count (для обновления старой базы)
+    # Проверка на наличие колонки trips_count
     cursor.execute("PRAGMA table_info(clients)")
     if 'trips_count' not in [col[1] for col in cursor.fetchall()]:
         cursor.execute("ALTER TABLE clients ADD COLUMN trips_count INTEGER DEFAULT 0")
@@ -45,7 +45,6 @@ def db_query(query, params=(), fetch=True):
         return [dict(row) for row in res] if fetch else None
     except Exception as e:
         print(f"Ошибка БД: {e}")
-        ui.notify(f"Ошибка БД: {e}", color='negative')
         return [] if fetch else None
 
 # Функция для открытия Яндекс.Карт с несколькими точками
@@ -129,7 +128,7 @@ def admin_page():
 
     with ui.header().classes('bg-primary justify-between p-2'):
         ui.label('MN Transfer | Панель Администратора').classes('text-h6')
-        ui.button(icon='logout', on_click=lambda: [app.storage.user.clear(), ui.navigate.to('/')]).props('flat color=white')
+        ui.button(icon='logout', on_click=lambda e: [app.storage.user.clear(), ui.navigate.to('/')]).props('flat color=white')
 
     with ui.tabs().classes('w-full bg-grey-2') as tabs:
         t1 = ui.tab('🆕 Рейсы')
@@ -184,9 +183,9 @@ def admin_page():
                                 if p['name'] or p['phone']:
                                     ui.label(f"👤 {p['name']} ({p['phone']})").classes('text-sm text-grey-8')
                         with ui.row():
-                            ui.button(icon='edit', on_click=lambda t=t: open_edit_dialog(t)).props('flat color=primary').tooltip('Редактировать')
-                            ui.button(icon='delete', on_click=lambda tid=t['id']: [db_query("DELETE FROM trips WHERE id=?", (tid,), False), ui.navigate.to('/admin')]).props('flat color=red').tooltip('Удалить')
-                            ui.button(icon='map', on_click=lambda t=t: open_combined_map(t['route'], t['passengers'])).props('flat color=blue').tooltip('На карту')
+                            ui.button(icon='edit', on_click=lambda e, trip=t: open_edit_dialog(trip)).props('flat color=primary').tooltip('Редактировать')
+                            ui.button(icon='delete', on_click=lambda e, tid=t['id']: [db_query("DELETE FROM trips WHERE id=?", (tid,), False), ui.navigate.to('/admin')]).props('flat color=red').tooltip('Удалить')
+                            ui.button(icon='map', on_click=lambda e, trip=t: open_combined_map(trip['route'], trip['passengers'])).props('flat color=blue').tooltip('На карту')
 
         # --- ВКЛАДКА 2: СОЗДАНИЕ РЕЙСА ---
         with ui.tab_panel(t2):
@@ -237,7 +236,7 @@ def admin_page():
                 with ui.card().classes('q-mb-xs p-2 w-full'):
                     with ui.row().classes('w-full items-center justify-between'):
                         ui.label(f"👤 {d['name']} | Авто: {d['car']} | Логин: {d['login']}")
-                        ui.button(icon='delete', on_click=lambda did=d['id']: [db_query("DELETE FROM drivers WHERE id=?", (did,), False), ui.navigate.to('/admin')]).props('flat color=red')
+                        ui.button(icon='delete', on_click=lambda e, did=d['id']: [db_query("DELETE FROM drivers WHERE id=?", (did,), False), ui.navigate.to('/admin')]).props('flat color=red')
 
         # --- ВКЛАДКА 4: АРХИВ (EXCEL) ---
         with ui.tab_panel(t4):
@@ -274,7 +273,7 @@ def admin_page():
                     with ui.row().classes('w-full justify-between items-center'):
                         ui.label(f"👤 {cl['name']} ({cl['phone']})").classes('text-bold')
                         ui.badge(f"Поездок: {cl['trips_count']}", color='orange' if cl['trips_count'] >= 5 else 'grey')
-                        ui.button(icon='delete', on_click=lambda cid=cl['id']: [db_query("DELETE FROM clients WHERE id=?", (cid,), False), ui.navigate.to('/admin')]).props('flat color=red small')
+                        ui.button(icon='delete', on_click=lambda e, cid=cl['id']: [db_query("DELETE FROM clients WHERE id=?", (cid,), False), ui.navigate.to('/admin')]).props('flat color=red small')
 
         # --- ВКЛАДКА 6: СТАТИСТИКА ---
         with ui.tab_panel(t6):
@@ -297,7 +296,7 @@ def driver_page():
     
     with ui.header().classes('bg-green-7 justify-between p-2'):
         ui.label('MN Transfer | Кабинет водителя').classes('text-h6 text-white')
-        ui.button(icon='logout', on_click=lambda: [app.storage.user.clear(), ui.navigate.to('/')]).props('flat color=white')
+        ui.button(icon='logout', on_click=lambda e: [app.storage.user.clear(), ui.navigate.to('/')]).props('flat color=white')
 
     jobs = db_query("SELECT * FROM trips WHERE driver_id=? AND status='Новый'", (uid,))
     
@@ -307,7 +306,7 @@ def driver_page():
     for j in jobs:
         with ui.card().classes('m-4 shadow-lg border-2 border-green w-full'):
             ui.label('📍 ' + j['route']).classes('text-h6 font-bold q-mb-sm')
-            ui.button('ОТКРЫТЬ КАРТУ (МАРШРУТ)', icon='map', on_click=lambda t=j: open_combined_map(t['route'], t['passengers'])).classes('w-full bg-blue text-white q-mb-md')
+            ui.button('ОТКРЫТЬ КАРТУ (МАРШРУТ)', icon='map', on_click=lambda e, trip=j: open_combined_map(trip['route'], trip['passengers'])).classes('w-full bg-blue text-white q-mb-md')
             
             ps = json.loads(j['passengers'])
             ui.label('Пассажиры:').classes('text-grey-7')
@@ -317,7 +316,7 @@ def driver_page():
                     if p['phone']:
                         ui.html(f'<a href="tel:{p["phone"]}"><button style="background:#25D366; color:white; border:none; border-radius:50%; width:45px; height:45px; font-size:20px; cursor:pointer;">📞</button></a>')
             
-            def complete(jid=j['id'], passengers=ps):
+            def complete(jid, passengers):
                 # 1. Завершаем рейс
                 db_query("UPDATE trips SET status='Завершен' WHERE id=?", (jid,), False)
                 # 2. Обновляем статистику клиентов
@@ -333,7 +332,7 @@ def driver_page():
                 ui.notify('✅ Рейс успешно завершен!', type='positive')
                 ui.navigate.to('/driver')
 
-            ui.button('ЗАВЕРШИТЬ РЕЙС', on_click=complete).classes('bg-green text-white w-full h-14 q-mt-md text-lg font-bold')
+            ui.button('ЗАВЕРШИТЬ РЕЙС', on_click=lambda e, jid=j['id'], passengers=ps: complete(jid, passengers)).classes('bg-green text-white w-full h-14 q-mt-md text-lg font-bold')
 
 # Запуск программы
 ui.run(port=int(os.environ.get("PORT", 8080)), host='0.0.0.0', title="MN Transfer", storage_secret="MN_TRANSFER_SECURE_KEY_777")
