@@ -47,7 +47,7 @@ def db_query(query, params=(), fetch=True):
 
 # --- КОМПОНЕНТ ПАССАЖИРОВ ---
 class PassengerManager:
-    def __init__(self, passengers=None):
+    def __init__(self, passengers=None, dark=False):
         self.passengers = passengers if passengers else [{"name": "", "phone": ""}]
         self.container = ui.column().classes('w-full border p-2 rounded bg-white')
         self.draw()
@@ -115,16 +115,46 @@ def admin_page():
         t1, t2, t3, t4, t5, t6 = ui.tab('🆕 Рейсы'), ui.tab('➕ Новый'), ui.tab('🚖 Водители'), ui.tab('📜 Архив'), ui.tab('👥 Клиенты'), ui.tab('📊 Стат')
 
     with ui.tab_panels(tabs, value=t1).classes('w-full'):
-        # --- ТЕКУЩИЕ РЕЙСЫ ---
+        # --- ТЕКУЩИЕ РЕЙСЫ (С РЕДАКТИРОВАНИЕМ) ---
         with ui.tab_panel(t1):
             trips = db_query("SELECT trips.*, drivers.name as dname FROM trips LEFT JOIN drivers ON trips.driver_id = drivers.id WHERE status='Новый'")
+            
+            def open_edit_dialog(trip):
+                with ui.dialog() as dialog, ui.card().classes('w-96'):
+                    ui.label('Редактирование заказа').classes('text-h6')
+                    new_route = ui.textarea('Маршрут', value=trip['route']).classes('w-full')
+                    new_price = ui.number('Цена', value=trip['price']).classes('w-full')
+                    
+                    drs = db_query("SELECT * FROM drivers")
+                    dr_options = {d['id']: d['name'] for d in drs}
+                    new_dr = ui.select(dr_options, label='Водитель', value=trip['driver_id']).classes('w-full')
+                    
+                    # Загружаем текущих пассажиров
+                    current_ps = json.loads(trip['passengers'])
+                    pm_edit = PassengerManager(passengers=current_ps)
+                    
+                    def save_edits():
+                        db_query('''UPDATE trips SET route=?, price=?, driver_id=?, passengers=? WHERE id=?''', 
+                                 (new_route.value, int(new_price.value), new_dr.value, pm_edit.get_json(), trip['id']), False)
+                        ui.notify('Изменения сохранены')
+                        dialog.close()
+                        ui.navigate.to('/admin')
+                    
+                    with ui.row().classes('w-full justify-end q-mt-md'):
+                        ui.button('Отмена', on_click=dialog.close).props('flat')
+                        ui.button('Сохранить', on_click=save_edits)
+                dialog.open()
+
             for t in trips:
                 with ui.card().classes('w-full q-mb-sm border-l-4 border-primary'):
-                    ui.label(t['route']).classes('text-bold')
-                    ui.label(f"Цена: {t['price']}₽ | {t['dname']}")
-                    with ui.row():
-                        ui.button(icon='delete', on_click=lambda tid=t['id']: [db_query("DELETE FROM trips WHERE id=?", (tid,), False), ui.navigate.to('/admin')]).props('flat color=red')
-                        ui.button(icon='map', on_click=lambda r=t['route']: ui.open(f'https://yandex.ru/maps/?text={r}')).props('flat color=blue')
+                    with ui.row().classes('w-full justify-between items-start'):
+                        with ui.column().classes('col'):
+                            ui.label(t['route']).classes('text-bold')
+                            ui.label(f"Цена: {t['price']}₽ | {t['dname']}")
+                        with ui.row():
+                            ui.button(icon='edit', on_click=lambda t=t: open_edit_dialog(t)).props('flat color=primary')
+                            ui.button(icon='delete', on_click=lambda tid=t['id']: [db_query("DELETE FROM trips WHERE id=?", (tid,), False), ui.navigate.to('/admin')]).props('flat color=red')
+                            ui.button(icon='map', on_click=lambda r=t['route']: ui.open(f'https://yandex.ru/maps/?text={r}')).props('flat color=blue')
 
         # --- СОЗДАНИЕ ---
         with ui.tab_panel(t2):
@@ -142,32 +172,7 @@ def admin_page():
                 ui.notify('✅ Рейс создан!'); ui.navigate.to('/admin')
             ui.button('🚀 ОПУБЛИКОВАТЬ', on_click=save).classes('w-full h-12 q-mt-md')
 
-        # --- АРХИВ + EXCEL ---
-        with ui.tab_panel(t4):
-            def export_to_excel():
-                data = db_query('''SELECT trips.id, trips.created_at as Дата, trips.route as Маршрут, 
-                                          trips.price as Цена, drivers.name as Водитель, trips.passengers as Пассажиры
-                                   FROM trips 
-                                   LEFT JOIN drivers ON trips.driver_id = drivers.id 
-                                   WHERE status="Завершен" ORDER BY trips.id DESC''')
-                if not data: return ui.notify('Архив пуст!', color='warning')
-                
-                df = pd.DataFrame(data)
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Архив рейсов')
-                
-                ui.download(output.getvalue(), 'MN_Transfer_Archive.xlsx')
-            
-            ui.button('📊 СКАЧАТЬ ВЕСЬ АРХИВ (EXCEL)', icon='download', on_click=export_to_excel).classes('w-full bg-green text-white q-mb-md h-12')
-            
-            for a in db_query("SELECT trips.*, drivers.name as dname FROM trips LEFT JOIN drivers ON trips.driver_id = drivers.id WHERE status='Завершен' ORDER BY id DESC"):
-                with ui.expansion(f"{a['created_at']} | {a['route'][:30]}..."):
-                    ui.label(f"Полный маршрут: {a['route']}")
-                    ui.label(f"Цена: {a['price']}₽ | Водитель: {a['dname']}")
-                    ui.label(f"Пассажиры: {a['passengers']}")
-
-        # --- ВОДИТЕЛИ ---
+        # --- ОСТАЛЬНЫЕ ВКЛАДКИ (БЕЗ ИЗМЕНЕНИЙ) ---
         with ui.tab_panel(t3):
             with ui.expansion('➕ Добавить водителя').classes('w-full border rounded'):
                 with ui.column().classes('p-4 w-full'):
@@ -179,7 +184,25 @@ def admin_page():
                         ui.label(f"👤 {d['name']} ({d['car']})")
                         ui.button(icon='delete', on_click=lambda did=d['id']: [db_query("DELETE FROM drivers WHERE id=?", (did,), False), ui.navigate.to('/admin')]).props('flat color=red')
 
-        # --- КЛИЕНТЫ ---
+        with ui.tab_panel(t4):
+            def export_to_excel():
+                data = db_query('''SELECT trips.id, trips.created_at as Дата, trips.route as Маршрут, 
+                                          trips.price as Цена, drivers.name as Водитель, trips.passengers as Пассажиры
+                                   FROM trips LEFT JOIN drivers ON trips.driver_id = drivers.id 
+                                   WHERE status="Завершен" ORDER BY trips.id DESC''')
+                if not data: return ui.notify('Архив пуст!')
+                df = pd.DataFrame(data)
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    df.to_excel(writer, index=False, sheet_name='Архив')
+                ui.download(output.getvalue(), 'MN_Transfer_Archive.xlsx')
+            ui.button('📊 СКАЧАТЬ EXCEL', icon='download', on_click=export_to_excel).classes('w-full bg-green text-white q-mb-md h-12')
+            for a in db_query("SELECT trips.*, drivers.name as dname FROM trips LEFT JOIN drivers ON trips.driver_id = drivers.id WHERE status='Завершен' ORDER BY id DESC"):
+                with ui.expansion(f"{a['created_at']} | {a['route'][:30]}..."):
+                    ui.label(f"Маршрут: {a['route']}")
+                    ui.label(f"Цена: {a['price']}₽ | Водитель: {a['dname']}")
+                    ui.label(f"Пассажиры: {a['passengers']}")
+
         with ui.tab_panel(t5):
             for cl in db_query("SELECT * FROM clients ORDER BY trips_count DESC"):
                 with ui.card().classes('q-mb-xs p-2 w-full'):
@@ -188,15 +211,13 @@ def admin_page():
                         ui.badge(f"Поездок: {cl['trips_count']}", color='orange' if cl['trips_count'] >= 5 else 'grey')
                         ui.button(icon='delete', on_click=lambda cid=cl['id']: [db_query("DELETE FROM clients WHERE id=?", (cid,), False), ui.navigate.to('/admin')]).props('flat color=red small')
 
-        # --- СТАТИСТИКА ---
         with ui.tab_panel(t6):
             stats = db_query('''SELECT drivers.name, SUM(trips.price) as total, COUNT(trips.id) as count 
                                 FROM trips JOIN drivers ON trips.driver_id = drivers.id 
                                 WHERE status="Завершен" GROUP BY drivers.id''')
             for s in stats:
                 with ui.card().classes('q-mb-sm p-3 w-full'):
-                    ui.label(f"🚖 {s['name']}").classes('text-bold text-lg')
-                    ui.label(f"Итого: {s['total']} ₽ | Рейсов: {s['count']}")
+                    ui.label(f"🚖 {s['name']}: {s['total']} ₽ ({s['count']} рейс.)").classes('text-bold text-lg')
 
 @ui.page('/driver')
 def driver_page():
