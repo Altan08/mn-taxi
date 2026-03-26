@@ -5,7 +5,6 @@ from io import BytesIO
 import json
 import os
 from datetime import datetime
-import urllib.parse
 
 # --- 1. НАСТРОЙКА БАЗЫ ДАННЫХ ---
 DB_DIR = "/data" if os.path.exists("/data") else "./data"
@@ -17,21 +16,17 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Таблица администраторов (для кастомного логина и пароля)
     cursor.execute('''CREATE TABLE IF NOT EXISTS admin_users 
                       (id INTEGER PRIMARY KEY, login TEXT, password TEXT)''')
     cursor.execute("INSERT OR IGNORE INTO admin_users (id, login, password) VALUES (1, 'admin', 'mn123')")
     
-    # Таблица водителей
     cursor.execute('''CREATE TABLE IF NOT EXISTS drivers 
                       (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, car TEXT, login TEXT, password TEXT)''')
     
-    # Таблица рейсов (driver_id теперь может быть пустым/0)
     cursor.execute('''CREATE TABLE IF NOT EXISTS trips 
                       (id INTEGER PRIMARY KEY AUTOINCREMENT, route TEXT, price INTEGER, 
                        driver_id INTEGER DEFAULT 0, status TEXT, passengers TEXT, created_at TEXT)''')
     
-    # Таблица клиентов
     cursor.execute('''CREATE TABLE IF NOT EXISTS clients 
                       (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, phone TEXT UNIQUE, trips_count INTEGER DEFAULT 0)''')
     
@@ -58,27 +53,6 @@ def db_query(query, params=(), fetch=True):
         print(f"Ошибка БД: {e}")
         ui.notify(f"Ошибка базы данных: {e}", color='negative')
         return [] if fetch else None
-
-# Функция для генерации маршрута в Яндекс.Картах со всеми точками
-def open_combined_map(route_text, passengers_json):
-    try:
-        ps = json.loads(passengers_json)
-        # Собираем все точки. Сначала основной маршрут
-        addresses = [route_text]
-        # Затем адреса пассажиров
-        for p in ps:
-            if "name" in p and len(p['name']) > 2:
-                addresses.append(p['name'])
-        
-        # Кодируем каждый адрес отдельно и соединяем через тильду (формат Яндекса)
-        encoded_addresses = [urllib.parse.quote(a.strip()) for a in addresses if a.strip()]
-        query = "~".join(encoded_addresses)
-        
-        url = f"https://yandex.ru/maps/?mode=routes&rtext={query}"
-        ui.open(url)
-    except Exception as e:
-        print(e)
-        ui.notify('Ошибка при формировании карты', color='negative')
 
 # --- КОМПОНЕНТ УПРАВЛЕНИЯ ПАССАЖИРАМИ ---
 class PassengerManager:
@@ -166,7 +140,7 @@ def admin_page():
 
     with ui.tab_panels(tabs, value=t1).classes('w-full'):
         
-        # --- ВКЛАДКА 1: АКТИВНЫЕ РЕЙСЫ (УПРАВЛЕНИЕ И ЗАВЕРШЕНИЕ) ---
+        # --- ВКЛАДКА 1: АКТИВНЫЕ РЕЙСЫ ---
         with ui.tab_panel(t1):
             trips = db_query("SELECT trips.*, IFNULL(drivers.name, 'Не назначен') as dname FROM trips LEFT JOIN drivers ON trips.driver_id = drivers.id WHERE status='Новый' ORDER BY trips.id DESC")
             drs_list = db_query("SELECT id, name FROM drivers")
@@ -183,9 +157,7 @@ def admin_page():
                 ui.notify('Водитель назначен', type='info')
                 
             def complete_trip(trip_id, passengers_json):
-                # Функция завершения перенесена сюда (для диспетчера)
                 db_query("UPDATE trips SET status='Завершен' WHERE id=?", (trip_id,), False)
-                
                 passengers = json.loads(passengers_json)
                 for p in passengers:
                     if p['phone']:
@@ -197,20 +169,37 @@ def admin_page():
                             db_query("INSERT INTO clients (name, phone, trips_count) VALUES (?, ?, 1)", (p['name'], p['phone']), False)
                 ui.notify('✅ Рейс успешно завершен!', type='positive')
                 ui.navigate.to('/admin')
+                
+            def quick_add_passenger(trip_id, current_passengers, name_val, phone_val):
+                if not name_val and not phone_val:
+                    return ui.notify('Заполните данные пассажира', color='warning')
+                ps = json.loads(current_passengers)
+                # Удаляем пустые заглушки, если они есть
+                ps = [p for p in ps if p['name'] or p['phone']]
+                ps.append({"name": name_val, "phone": phone_val})
+                db_query("UPDATE trips SET passengers=? WHERE id=?", (json.dumps(ps, ensure_ascii=False), trip_id), False)
+                ui.notify('Пассажир добавлен', type='positive')
+                ui.navigate.to('/admin')
 
             def open_edit_dialog(trip):
                 with ui.dialog() as dialog, ui.card().classes('w-full max-w-md'):
                     ui.label('Редактирование рейса').classes('text-h6 font-bold q-mb-md')
                     edit_date = ui.input('Дата и время', value=trip['created_at']).classes('w-full')
-                    edit_route = ui.textarea('Маршрут', value=trip['route']).classes('w-full')
+                    
+                    # Пытаемся разбить маршрут на Откуда и Куда
+                    parts = trip['route'].split(' ➔ ', 1) if ' ➔ ' in trip['route'] else [trip['route'], '']
+                    edit_from = ui.input('📍 Откуда', value=parts[0]).classes('w-full')
+                    edit_to = ui.input('🏁 Куда', value=parts[1] if len(parts)>1 else '').classes('w-full')
+                    
                     edit_price = ui.number('Цена (₽)', value=trip['price']).classes('w-full')
                     
                     ui.label('Пассажиры').classes('text-bold q-mt-md')
                     pm_edit = PassengerManager(passengers=json.loads(trip['passengers']))
                     
                     def save_edits():
+                        new_route_str = f"{edit_from.value} ➔ {edit_to.value}"
                         db_query('''UPDATE trips SET route=?, price=?, passengers=?, created_at=? WHERE id=?''', 
-                                 (edit_route.value, int(edit_price.value), pm_edit.get_json(), edit_date.value, trip['id']), False)
+                                 (new_route_str, int(edit_price.value), pm_edit.get_json(), edit_date.value, trip['id']), False)
                         ui.notify('Рейс обновлен', type='positive')
                         dialog.close()
                         ui.navigate.to('/admin')
@@ -221,47 +210,62 @@ def admin_page():
                 dialog.open()
 
             for t in trips:
-                with ui.card().classes('w-full q-mb-sm border-l-4 border-primary'):
+                with ui.card().classes('w-full q-mb-md border-2 border-primary'):
                     with ui.row().classes('w-full justify-between items-start no-wrap'):
                         with ui.column().classes('col'):
-                            ui.label(f"📅 {t['created_at']}").classes('text-caption text-grey-7')
-                            ui.label(t['route']).classes('text-bold text-lg')
-                            ui.label(f"💰 {t['price']}₽")
+                            ui.label(f"📅 {t['created_at']}").classes('text-caption text-grey-7 q-mb-xs')
+                            ui.label(t['route']).classes('text-bold text-lg text-primary')
+                            ui.label(f"💰 {t['price']}₽").classes('text-bold')
                             
-                            # Выбор водителя прямо в карточке
                             ui.select(dr_options, label='🚖 Водитель', value=t['driver_id'] if t['driver_id'] else 0,
-                                      on_change=lambda e, tid=t['id']: assign_driver(tid, e.value)).classes('w-64 q-mt-xs q-mb-xs')
+                                      on_change=lambda e, tid=t['id']: assign_driver(tid, e.value)).classes('w-full max-w-xs q-mt-sm q-mb-sm')
                             
+                            ui.label('Пассажиры:').classes('text-sm text-grey-8 q-mt-sm')
                             ps_data = json.loads(t['passengers'])
                             for p in ps_data:
                                 if p['name'] or p['phone']:
-                                    ui.label(f"👤 {p['name']} ({p['phone']})").classes('text-sm text-grey-8')
-                        
-                        with ui.column().classes('items-center q-gutter-sm'):
-                            ui.button('ЗАВЕРШИТЬ', on_click=lambda e, tid=t['id'], pss=t['passengers']: complete_trip(tid, pss)).classes('bg-green text-white w-full')
-                            with ui.row():
-                                ui.button(icon='map', on_click=lambda e, tr=t: open_combined_map(tr['route'], tr['passengers'])).props('flat color=blue').tooltip('Открыть карту')
-                                ui.button(icon='edit', on_click=lambda e, tr=t: open_edit_dialog(tr)).props('flat color=primary').tooltip('Редактировать')
-                                ui.button(icon='delete', on_click=lambda e, tid=t['id']: [db_query("DELETE FROM trips WHERE id=?", (tid,), False), ui.navigate.to('/admin')]).props('flat color=red').tooltip('Удалить')
+                                    ui.label(f"👤 {p['name']} ({p['phone']})").classes('text-sm text-black border-l-2 border-grey pl-2')
+                            
+                            # Быстрое добавление пассажира инлайн
+                            with ui.expansion('➕ Быстро добавить пассажира').classes('w-full q-mt-sm bg-grey-1 rounded'):
+                                with ui.row().classes('w-full items-center no-wrap q-gutter-xs p-2'):
+                                    q_phone = ui.input('Телефон').classes('col-5')
+                                    q_name = ui.input('Имя/Адрес').classes('col-5')
+                                    ui.button('OK', on_click=lambda e, tid=t['id'], pss=t['passengers'], n=q_name, ph=q_phone: quick_add_passenger(tid, pss, n.value, ph.value)).classes('col-2 bg-primary text-white')
 
-        # --- ВКЛАДКА 2: СОЗДАНИЕ РЕЙСА (БЕЗ ВОДИТЕЛЯ) ---
+                        with ui.column().classes('items-end q-gutter-sm'):
+                            ui.button(icon='edit', on_click=lambda e, tr=t: open_edit_dialog(tr)).props('flat color=primary').tooltip('Редактировать')
+                            ui.button(icon='delete', on_click=lambda e, tid=t['id']: [db_query("DELETE FROM trips WHERE id=?", (tid,), False), ui.navigate.to('/admin')]).props('flat color=red').tooltip('Удалить')
+                    
+                    ui.separator().classes('q-mt-sm q-mb-sm')
+                    # Кнопка завершения теперь в самом низу на всю ширину
+                    ui.button('✅ ЗАВЕРШИТЬ РЕЙС', on_click=lambda e, tid=t['id'], pss=t['passengers']: complete_trip(tid, pss)).classes('w-full h-12 bg-green-6 text-white text-bold')
+
+        # --- ВКЛАДКА 2: СОЗДАНИЕ РЕЙСА ---
         with ui.tab_panel(t2):
             ui.label('Создать новый рейс').classes('text-h6 q-mb-md')
             current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
-            new_trip_date = ui.input('Дата и время', value=current_time).classes('w-full')
-            new_route = ui.textarea('📍 Маршрут (Откуда - Куда)').classes('w-full')
-            new_price = ui.number('💰 Цена (₽)', value=4000).classes('w-full')
+            new_trip_date = ui.input('Дата и время', value=current_time).classes('w-full q-mb-sm')
+            
+            # Раздельные поля ввода
+            with ui.row().classes('w-full no-wrap q-gutter-sm q-mb-sm'):
+                new_from = ui.input('📍 Откуда (Город/Адрес)').classes('w-1/2')
+                new_to = ui.input('🏁 Куда (Город/Адрес)').classes('w-1/2')
+                
+            new_price = ui.number('💰 Цена (₽)', value=4000).classes('w-full q-mb-md')
             
             ui.label('Пассажиры и промежуточные точки:').classes('q-mt-md text-bold')
             new_pm = PassengerManager()
             
             def create_trip():
-                if not new_route.value:
-                    return ui.notify('Заполните маршрут!', color='warning')
+                if not new_from.value or not new_to.value:
+                    return ui.notify('Заполните Откуда и Куда!', color='warning')
                 
-                # driver_id передаем как 0 (Не назначен)
+                # Склеиваем маршрут
+                route_str = f"{new_from.value} ➔ {new_to.value}"
+                
                 db_query("INSERT INTO trips (route, price, driver_id, status, passengers, created_at) VALUES (?,?,?,?,?,?)",
-                         (new_route.value, int(new_price.value), 0, "Новый", new_pm.get_json(), new_trip_date.value), False)
+                         (route_str, int(new_price.value), 0, "Новый", new_pm.get_json(), new_trip_date.value), False)
                 ui.notify('✅ Рейс успешно создан! Назначьте водителя во вкладке "Рейсы"', type='positive')
                 ui.navigate.to('/admin')
             
@@ -325,7 +329,7 @@ def admin_page():
             for s in stats:
                 ui.label(f"🚖 {s['name']}: {s['total']} ₽").classes('text-h6 border-b w-full p-2')
                 
-        # --- ВКЛАДКА 7: НАСТРОЙКИ (СМЕНА ЛОГИНА/ПАРОЛЯ) ---
+        # --- ВКЛАДКА 7: НАСТРОЙКИ ---
         with ui.tab_panel(t7):
             ui.label('Смена доступов Администратора').classes('text-h6 q-mb-md')
             ui.label('Внимание: Если вы забудете эти данные, потребуется вмешательство разработчика.').classes('text-red text-sm q-mb-md')
@@ -374,5 +378,4 @@ def driver_page():
                     if p['phone']:
                         ui.html(f'<a href="tel:{p["phone"]}"><button style="background:#25D366;color:white;border:none;border-radius:50%;width:45px;height:45px;font-size:20px;cursor:pointer;">📞</button></a>')
 
-# Запуск
 ui.run(port=int(os.environ.get("PORT", 8080)), host='0.0.0.0', title="MN Transfer", storage_secret="MN_TRANSFER_PRO_KEY_999")
