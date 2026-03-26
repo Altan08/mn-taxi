@@ -8,7 +8,6 @@ from datetime import datetime
 import urllib.parse
 
 # --- 1. НАСТРОЙКА БАЗЫ ДАННЫХ ---
-# Автоматическое определение пути (для локального запуска или Railway)
 DB_DIR = "/data" if os.path.exists("/data") else "./data"
 if not os.path.exists(DB_DIR): 
     os.makedirs(DB_DIR)
@@ -17,19 +16,25 @@ DB_PATH = os.path.join(DB_DIR, "taxi.db")
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    
+    # Таблица администраторов (для кастомного логина и пароля)
+    cursor.execute('''CREATE TABLE IF NOT EXISTS admin_users 
+                      (id INTEGER PRIMARY KEY, login TEXT, password TEXT)''')
+    cursor.execute("INSERT OR IGNORE INTO admin_users (id, login, password) VALUES (1, 'admin', 'mn123')")
+    
     # Таблица водителей
     cursor.execute('''CREATE TABLE IF NOT EXISTS drivers 
                       (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, car TEXT, login TEXT, password TEXT)''')
-    # Таблица рейсов
+    
+    # Таблица рейсов (driver_id теперь может быть пустым/0)
     cursor.execute('''CREATE TABLE IF NOT EXISTS trips 
                       (id INTEGER PRIMARY KEY AUTOINCREMENT, route TEXT, price INTEGER, 
-                       driver_id INTEGER, status TEXT, passengers TEXT, created_at TEXT,
-                       FOREIGN KEY(driver_id) REFERENCES drivers(id))''')
+                       driver_id INTEGER DEFAULT 0, status TEXT, passengers TEXT, created_at TEXT)''')
+    
     # Таблица клиентов
     cursor.execute('''CREATE TABLE IF NOT EXISTS clients 
                       (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, phone TEXT UNIQUE, trips_count INTEGER DEFAULT 0)''')
     
-    # Проверка на наличие колонки trips_count для старых баз
     cursor.execute("PRAGMA table_info(clients)")
     if 'trips_count' not in [col[1] for col in cursor.fetchall()]:
         cursor.execute("ALTER TABLE clients ADD COLUMN trips_count INTEGER DEFAULT 0")
@@ -54,21 +59,26 @@ def db_query(query, params=(), fetch=True):
         ui.notify(f"Ошибка базы данных: {e}", color='negative')
         return [] if fetch else None
 
-# Функция для генерации маршрута в Яндекс.Картах
+# Функция для генерации маршрута в Яндекс.Картах со всеми точками
 def open_combined_map(route_text, passengers_json):
     try:
         ps = json.loads(passengers_json)
+        # Собираем все точки. Сначала основной маршрут
         addresses = [route_text]
+        # Затем адреса пассажиров
         for p in ps:
-            if "name" in p and len(p['name']) > 5:
+            if "name" in p and len(p['name']) > 2:
                 addresses.append(p['name'])
         
-        query = " ~ ".join([a for a in addresses if a.strip()])
-        encoded_query = urllib.parse.quote(query)
-        url = f"https://yandex.ru/maps/?mode=routes&rtext={encoded_query}"
+        # Кодируем каждый адрес отдельно и соединяем через тильду (формат Яндекса)
+        encoded_addresses = [urllib.parse.quote(a.strip()) for a in addresses if a.strip()]
+        query = "~".join(encoded_addresses)
+        
+        url = f"https://yandex.ru/maps/?mode=routes&rtext={query}"
         ui.open(url)
-    except:
-        ui.open(f"https://yandex.ru/maps/?text={urllib.parse.quote(route_text)}")
+    except Exception as e:
+        print(e)
+        ui.notify('Ошибка при формировании карты', color='negative')
 
 # --- КОМПОНЕНТ УПРАВЛЕНИЯ ПАССАЖИРАМИ ---
 class PassengerManager:
@@ -121,7 +131,9 @@ def login_page():
         p = ui.input('Пароль', password=True).classes('w-full')
         
         def do_login():
-            if l.value == "admin" and p.value == "mn123":
+            admin_data = db_query("SELECT login, password FROM admin_users WHERE id=1")
+            
+            if admin_data and l.value == admin_data[0]['login'] and p.value == admin_data[0]['password']:
                 app.storage.user.update({'auth': True, 'role': 'admin'})
                 ui.navigate.to('/admin')
             else:
@@ -131,6 +143,7 @@ def login_page():
                     ui.navigate.to('/driver')
                 else: 
                     ui.notify('Неверный логин или пароль!', color='negative')
+        
         ui.button('ВОЙТИ', on_click=do_login).classes('w-full q-mt-md h-12')
 
 @ui.page('/admin')
@@ -138,7 +151,7 @@ def admin_page():
     if not app.storage.user.get('auth') or app.storage.user.get('role') != 'admin':
         ui.navigate.to('/'); return
 
-    with ui.header().classes('bg-primary justify-between p-2'):
+    with ui.header().classes('bg-primary justify-between p-2 items-center'):
         ui.label('MN Transfer | Админ-панель').classes('text-h6')
         ui.button(icon='logout', on_click=lambda e: [app.storage.user.clear(), ui.navigate.to('/')]).props('flat color=white')
 
@@ -149,33 +162,55 @@ def admin_page():
         t4 = ui.tab('📜 Архив')
         t5 = ui.tab('👥 Клиенты')
         t6 = ui.tab('📊 Стат')
+        t7 = ui.tab('⚙️ Настройки')
 
     with ui.tab_panels(tabs, value=t1).classes('w-full'):
         
-        # --- ВКЛАДКА 1: СПИСОК РЕЙСОВ ---
+        # --- ВКЛАДКА 1: АКТИВНЫЕ РЕЙСЫ (УПРАВЛЕНИЕ И ЗАВЕРШЕНИЕ) ---
         with ui.tab_panel(t1):
-            trips = db_query("SELECT trips.*, drivers.name as dname FROM trips LEFT JOIN drivers ON trips.driver_id = drivers.id WHERE status='Новый' ORDER BY id DESC")
+            trips = db_query("SELECT trips.*, IFNULL(drivers.name, 'Не назначен') as dname FROM trips LEFT JOIN drivers ON trips.driver_id = drivers.id WHERE status='Новый' ORDER BY trips.id DESC")
+            drs_list = db_query("SELECT id, name FROM drivers")
+            dr_options = {0: "Не назначен"}
+            if drs_list:
+                for d in drs_list:
+                    dr_options[d['id']] = d['name']
             
             if not trips:
                 ui.label('Нет активных рейсов').classes('text-h6 text-grey text-center w-full q-mt-md')
 
+            def assign_driver(trip_id, new_driver_id):
+                db_query("UPDATE trips SET driver_id=? WHERE id=?", (new_driver_id, trip_id), False)
+                ui.notify('Водитель назначен', type='info')
+                
+            def complete_trip(trip_id, passengers_json):
+                # Функция завершения перенесена сюда (для диспетчера)
+                db_query("UPDATE trips SET status='Завершен' WHERE id=?", (trip_id,), False)
+                
+                passengers = json.loads(passengers_json)
+                for p in passengers:
+                    if p['phone']:
+                        curr = db_query("SELECT trips_count FROM clients WHERE phone=?", (p['phone'],))
+                        if curr:
+                            new_c = 0 if curr[0]['trips_count'] >= 5 else curr[0]['trips_count'] + 1
+                            db_query("UPDATE clients SET trips_count=?, name=? WHERE phone=?", (new_c, p['name'], p['phone']), False)
+                        else:
+                            db_query("INSERT INTO clients (name, phone, trips_count) VALUES (?, ?, 1)", (p['name'], p['phone']), False)
+                ui.notify('✅ Рейс успешно завершен!', type='positive')
+                ui.navigate.to('/admin')
+
             def open_edit_dialog(trip):
                 with ui.dialog() as dialog, ui.card().classes('w-full max-w-md'):
                     ui.label('Редактирование рейса').classes('text-h6 font-bold q-mb-md')
-                    
                     edit_date = ui.input('Дата и время', value=trip['created_at']).classes('w-full')
                     edit_route = ui.textarea('Маршрут', value=trip['route']).classes('w-full')
                     edit_price = ui.number('Цена (₽)', value=trip['price']).classes('w-full')
-                    
-                    drs = db_query("SELECT * FROM drivers")
-                    edit_dr = ui.select({d['id']: d['name'] for d in drs}, label='Водитель', value=trip['driver_id']).classes('w-full')
                     
                     ui.label('Пассажиры').classes('text-bold q-mt-md')
                     pm_edit = PassengerManager(passengers=json.loads(trip['passengers']))
                     
                     def save_edits():
-                        db_query('''UPDATE trips SET route=?, price=?, driver_id=?, passengers=?, created_at=? WHERE id=?''', 
-                                 (edit_route.value, int(edit_price.value), edit_dr.value, pm_edit.get_json(), edit_date.value, trip['id']), False)
+                        db_query('''UPDATE trips SET route=?, price=?, passengers=?, created_at=? WHERE id=?''', 
+                                 (edit_route.value, int(edit_price.value), pm_edit.get_json(), edit_date.value, trip['id']), False)
                         ui.notify('Рейс обновлен', type='positive')
                         dialog.close()
                         ui.navigate.to('/admin')
@@ -191,44 +226,43 @@ def admin_page():
                         with ui.column().classes('col'):
                             ui.label(f"📅 {t['created_at']}").classes('text-caption text-grey-7')
                             ui.label(t['route']).classes('text-bold text-lg')
-                            ui.label(f"💰 {t['price']}₽ | 🚖 {t['dname']}")
+                            ui.label(f"💰 {t['price']}₽")
+                            
+                            # Выбор водителя прямо в карточке
+                            ui.select(dr_options, label='🚖 Водитель', value=t['driver_id'] if t['driver_id'] else 0,
+                                      on_change=lambda e, tid=t['id']: assign_driver(tid, e.value)).classes('w-64 q-mt-xs q-mb-xs')
+                            
                             ps_data = json.loads(t['passengers'])
                             for p in ps_data:
                                 if p['name'] or p['phone']:
                                     ui.label(f"👤 {p['name']} ({p['phone']})").classes('text-sm text-grey-8')
-                        with ui.column().classes('items-center'):
-                            ui.button(icon='edit', on_click=lambda e, tr=t: open_edit_dialog(tr)).props('flat color=primary')
-                            ui.button(icon='map', on_click=lambda e, tr=t: open_combined_map(tr['route'], tr['passengers'])).props('flat color=blue')
-                            ui.button(icon='delete', on_click=lambda e, tid=t['id']: [db_query("DELETE FROM trips WHERE id=?", (tid,), False), ui.navigate.to('/admin')]).props('flat color=red')
+                        
+                        with ui.column().classes('items-center q-gutter-sm'):
+                            ui.button('ЗАВЕРШИТЬ', on_click=lambda e, tid=t['id'], pss=t['passengers']: complete_trip(tid, pss)).classes('bg-green text-white w-full')
+                            with ui.row():
+                                ui.button(icon='map', on_click=lambda e, tr=t: open_combined_map(tr['route'], tr['passengers'])).props('flat color=blue').tooltip('Открыть карту')
+                                ui.button(icon='edit', on_click=lambda e, tr=t: open_edit_dialog(tr)).props('flat color=primary').tooltip('Редактировать')
+                                ui.button(icon='delete', on_click=lambda e, tid=t['id']: [db_query("DELETE FROM trips WHERE id=?", (tid,), False), ui.navigate.to('/admin')]).props('flat color=red').tooltip('Удалить')
 
-        # --- ВКЛАДКА 2: СОЗДАНИЕ РЕЙСА ---
+        # --- ВКЛАДКА 2: СОЗДАНИЕ РЕЙСА (БЕЗ ВОДИТЕЛЯ) ---
         with ui.tab_panel(t2):
             ui.label('Создать новый рейс').classes('text-h6 q-mb-md')
-            
-            # Добавляем поле даты при создании
             current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
             new_trip_date = ui.input('Дата и время', value=current_time).classes('w-full')
-            
             new_route = ui.textarea('📍 Маршрут (Откуда - Куда)').classes('w-full')
             new_price = ui.number('💰 Цена (₽)', value=4000).classes('w-full')
             
-            drs_list = db_query("SELECT * FROM drivers")
-            if drs_list:
-                new_dr_select = ui.select({d['id']: d['name'] for d in drs_list}, label='🚖 Назначить водителя').classes('w-full')
-            else:
-                ui.label('Сначала добавьте водителей!').classes('text-red font-bold')
-                new_dr_select = None
-
             ui.label('Пассажиры и промежуточные точки:').classes('q-mt-md text-bold')
             new_pm = PassengerManager()
             
             def create_trip():
-                if not new_route.value or not new_dr_select or not new_dr_select.value:
-                    return ui.notify('Заполните маршрут и выберите водителя!', color='warning')
+                if not new_route.value:
+                    return ui.notify('Заполните маршрут!', color='warning')
                 
+                # driver_id передаем как 0 (Не назначен)
                 db_query("INSERT INTO trips (route, price, driver_id, status, passengers, created_at) VALUES (?,?,?,?,?,?)",
-                         (new_route.value, int(new_price.value), new_dr_select.value, "Новый", new_pm.get_json(), new_trip_date.value), False)
-                ui.notify('✅ Рейс успешно создан!', type='positive')
+                         (new_route.value, int(new_price.value), 0, "Новый", new_pm.get_json(), new_trip_date.value), False)
+                ui.notify('✅ Рейс успешно создан! Назначьте водителя во вкладке "Рейсы"', type='positive')
                 ui.navigate.to('/admin')
             
             ui.button('🚀 ОПУБЛИКОВАТЬ РЕЙС', on_click=create_trip).classes('w-full h-14 q-mt-lg bg-primary text-white text-lg')
@@ -286,8 +320,29 @@ def admin_page():
             stats = db_query('''SELECT drivers.name, SUM(trips.price) as total 
                                 FROM trips JOIN drivers ON trips.driver_id = drivers.id 
                                 WHERE status="Завершен" GROUP BY drivers.id''')
+            if not stats:
+                ui.label('Нет завершенных рейсов').classes('text-grey')
             for s in stats:
                 ui.label(f"🚖 {s['name']}: {s['total']} ₽").classes('text-h6 border-b w-full p-2')
+                
+        # --- ВКЛАДКА 7: НАСТРОЙКИ (СМЕНА ЛОГИНА/ПАРОЛЯ) ---
+        with ui.tab_panel(t7):
+            ui.label('Смена доступов Администратора').classes('text-h6 q-mb-md')
+            ui.label('Внимание: Если вы забудете эти данные, потребуется вмешательство разработчика.').classes('text-red text-sm q-mb-md')
+            
+            admin_data = db_query("SELECT login, password FROM admin_users WHERE id=1")[0]
+            
+            new_login = ui.input('Новый логин', value=admin_data['login']).classes('w-full q-mb-sm')
+            new_pass = ui.input('Новый пароль', value=admin_data['password']).classes('w-full q-mb-sm')
+            
+            def change_admin_creds():
+                if new_login.value and new_pass.value:
+                    db_query("UPDATE admin_users SET login=?, password=? WHERE id=1", (new_login.value, new_pass.value), False)
+                    ui.notify('✅ Логин и пароль успешно изменены!', type='positive')
+                else:
+                    ui.notify('Заполните оба поля!', color='negative')
+                    
+            ui.button('СОХРАНИТЬ ДОСТУПЫ', on_click=change_admin_creds).classes('w-full bg-primary text-white')
 
 @ui.page('/driver')
 def driver_page():
@@ -295,42 +350,29 @@ def driver_page():
         ui.navigate.to('/'); return
     
     uid = app.storage.user.get('user_id')
-    with ui.header().classes('bg-green-7 justify-between p-2'):
-        ui.label('Личный кабинет водителя').classes('text-h6')
+    driver_info = db_query("SELECT name FROM drivers WHERE id=?", (uid,))[0]
+    
+    with ui.header().classes('bg-green-7 justify-between p-2 items-center'):
+        ui.label(f"Водитель: {driver_info['name']}").classes('text-h6')
         ui.button(icon='logout', on_click=lambda e: [app.storage.user.clear(), ui.navigate.to('/')]).props('flat color=white')
 
     jobs = db_query("SELECT * FROM trips WHERE driver_id=? AND status='Новый'", (uid,))
     
     if not jobs:
-        ui.label('Свободных заказов нет').classes('absolute-center text-grey text-h6')
+        ui.label('Сейчас у вас нет назначенных рейсов').classes('absolute-center text-grey text-h6 text-center')
 
     for j in jobs:
         with ui.card().classes('m-4 shadow-lg border-2 border-green w-full'):
             ui.label(f"📅 {j['created_at']}").classes('text-grey-7 text-sm')
-            ui.label(j['route']).classes('text-h6 font-bold')
-            ui.button('ОТКРЫТЬ КАРТУ', icon='map', on_click=lambda e, tr=j: open_combined_map(tr['route'], tr['passengers'])).classes('w-full bg-blue text-white q-mb-md')
+            ui.label(j['route']).classes('text-h6 font-bold q-mb-md')
             
             ps = json.loads(j['passengers'])
+            ui.label('Пассажиры:').classes('text-sm text-grey q-mb-xs')
             for p in ps:
                 with ui.row().classes('w-full justify-between p-2 bg-grey-1 items-center rounded q-mb-xs border'):
-                    ui.label(f"{p['name']}\n{p['phone']}").classes('whitespace-pre font-bold')
+                    ui.label(f"{p['name']}\n{p['phone']}").classes('whitespace-pre font-bold text-base')
                     if p['phone']:
                         ui.html(f'<a href="tel:{p["phone"]}"><button style="background:#25D366;color:white;border:none;border-radius:50%;width:45px;height:45px;font-size:20px;cursor:pointer;">📞</button></a>')
-            
-            def finish(jid, passengers):
-                db_query("UPDATE trips SET status='Завершен' WHERE id=?", (jid,), False)
-                for p in passengers:
-                    if p['phone']:
-                        curr = db_query("SELECT trips_count FROM clients WHERE phone=?", (p['phone'],))
-                        if curr:
-                            new_c = 0 if curr[0]['trips_count'] >= 5 else curr[0]['trips_count'] + 1
-                            db_query("UPDATE clients SET trips_count=?, name=? WHERE phone=?", (new_c, p['name'], p['phone']), False)
-                        else:
-                            db_query("INSERT INTO clients (name, phone, trips_count) VALUES (?, ?, 1)", (p['name'], p['phone']), False)
-                ui.notify('Рейс успешно завершен!', type='positive')
-                ui.navigate.to('/driver')
-
-            ui.button('ЗАВЕРШИТЬ РЕЙС', on_click=lambda e, jid=j['id'], pss=ps: finish(jid, pss)).classes('bg-green text-white w-full h-14 q-mt-md text-lg font-bold')
 
 # Запуск
 ui.run(port=int(os.environ.get("PORT", 8080)), host='0.0.0.0', title="MN Transfer", storage_secret="MN_TRANSFER_PRO_KEY_999")
