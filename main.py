@@ -100,7 +100,7 @@ def login_page():
         return
 
     with ui.card().classes('absolute-center w-80 p-6 shadow-2xl'):
-        ui.label('MN Transfer').classes('text-h4 text-center text-primary font-bold q-mb-md')
+        ui.label('Transfer MN').classes('text-h4 text-center text-primary font-bold q-mb-md')
         l = ui.input('Логин').classes('w-full')
         p = ui.input('Пароль', password=True).classes('w-full')
         
@@ -126,7 +126,7 @@ def admin_page():
         ui.navigate.to('/'); return
 
     with ui.header().classes('bg-primary justify-between p-2 items-center'):
-        ui.label('MN Transfer | Админ-панель').classes('text-h6')
+        ui.label('Transfer MN | Админ-панель').classes('text-h6')
         ui.button(icon='logout', on_click=lambda e: [app.storage.user.clear(), ui.navigate.to('/')]).props('flat color=white')
 
     with ui.tabs().classes('w-full bg-grey-2') as tabs:
@@ -174,7 +174,6 @@ def admin_page():
                 if not name_val and not phone_val:
                     return ui.notify('Заполните данные пассажира', color='warning')
                 ps = json.loads(current_passengers)
-                # Удаляем пустые заглушки, если они есть
                 ps = [p for p in ps if p['name'] or p['phone']]
                 ps.append({"name": name_val, "phone": phone_val})
                 db_query("UPDATE trips SET passengers=? WHERE id=?", (json.dumps(ps, ensure_ascii=False), trip_id), False)
@@ -186,7 +185,6 @@ def admin_page():
                     ui.label('Редактирование рейса').classes('text-h6 font-bold q-mb-md')
                     edit_date = ui.input('Дата и время', value=trip['created_at']).classes('w-full')
                     
-                    # Пытаемся разбить маршрут на Откуда и Куда
                     parts = trip['route'].split(' ➔ ', 1) if ' ➔ ' in trip['route'] else [trip['route'], '']
                     edit_from = ui.input('📍 Откуда', value=parts[0]).classes('w-full')
                     edit_to = ui.input('🏁 Куда', value=parts[1] if len(parts)>1 else '').classes('w-full')
@@ -226,7 +224,6 @@ def admin_page():
                                 if p['name'] or p['phone']:
                                     ui.label(f"👤 {p['name']} ({p['phone']})").classes('text-sm text-black border-l-2 border-grey pl-2')
                             
-                            # Быстрое добавление пассажира инлайн
                             with ui.expansion('➕ Быстро добавить пассажира').classes('w-full q-mt-sm bg-grey-1 rounded'):
                                 with ui.row().classes('w-full items-center no-wrap q-gutter-xs p-2'):
                                     q_phone = ui.input('Телефон').classes('col-5')
@@ -238,7 +235,6 @@ def admin_page():
                             ui.button(icon='delete', on_click=lambda e, tid=t['id']: [db_query("DELETE FROM trips WHERE id=?", (tid,), False), ui.navigate.to('/admin')]).props('flat color=red').tooltip('Удалить')
                     
                     ui.separator().classes('q-mt-sm q-mb-sm')
-                    # Кнопка завершения теперь в самом низу на всю ширину
                     ui.button('✅ ЗАВЕРШИТЬ РЕЙС', on_click=lambda e, tid=t['id'], pss=t['passengers']: complete_trip(tid, pss)).classes('w-full h-12 bg-green-6 text-white text-bold')
 
         # --- ВКЛАДКА 2: СОЗДАНИЕ РЕЙСА ---
@@ -247,12 +243,11 @@ def admin_page():
             current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
             new_trip_date = ui.input('Дата и время', value=current_time).classes('w-full q-mb-sm')
             
-            # Раздельные поля ввода
             with ui.row().classes('w-full no-wrap q-gutter-sm q-mb-sm'):
                 new_from = ui.input('📍 Откуда (Город/Адрес)').classes('w-1/2')
                 new_to = ui.input('🏁 Куда (Город/Адрес)').classes('w-1/2')
                 
-            new_price = ui.number('💰 Цена (₽)', value=4000).classes('w-full q-mb-md')
+            new_price = ui.number('💰 Цена (₽)', value=1200).classes('w-full q-mb-md')
             
             ui.label('Пассажиры и промежуточные точки:').classes('q-mt-md text-bold')
             new_pm = PassengerManager()
@@ -261,7 +256,6 @@ def admin_page():
                 if not new_from.value or not new_to.value:
                     return ui.notify('Заполните Откуда и Куда!', color='warning')
                 
-                # Склеиваем маршрут
                 route_str = f"{new_from.value} ➔ {new_to.value}"
                 
                 db_query("INSERT INTO trips (route, price, driver_id, status, passengers, created_at) VALUES (?,?,?,?,?,?)",
@@ -306,10 +300,40 @@ def admin_page():
             
             ui.button('📊 СКАЧАТЬ АРХИВ (EXCEL)', icon='download', on_click=export).classes('w-full bg-green text-white h-12 q-mb-md')
             
-            for a in db_query("SELECT * FROM trips WHERE status='Завершен' ORDER BY id DESC"):
-                with ui.expansion(f"{a['created_at']} | {a['route'][:30]}..."):
-                    ui.label(f"Полный маршрут: {a['route']}")
-                    ui.label(f"Цена: {a['price']}₽")
+            search_input = ui.input('🔍 Поиск по дате (например: 28.03) или маршруту', 
+                                    on_change=lambda e: render_archive(e.value)).classes('w-full q-mb-md')
+            
+            archive_container = ui.column().classes('w-full')
+            
+            def render_archive(query=""):
+                archive_container.clear()
+                all_archived = db_query("SELECT * FROM trips WHERE status='Завершен' ORDER BY id DESC")
+                
+                with archive_container:
+                    if not all_archived:
+                        ui.label('Архив пуст').classes('text-grey text-center w-full')
+                        return
+                    
+                    count = 0
+                    for a in all_archived:
+                        if query:
+                            q_lower = query.lower()
+                            if q_lower not in a['created_at'].lower() and q_lower not in a['route'].lower():
+                                continue
+                                
+                        count += 1
+                        with ui.expansion(f"{a['created_at']} | {a['route'][:30]}...").classes('w-full border q-mb-xs bg-white rounded'):
+                            ui.label(f"Полный маршрут: {a['route']}").classes('text-bold')
+                            ui.label(f"Цена: {a['price']}₽")
+                            ps_arch = json.loads(a['passengers'])
+                            for p in ps_arch:
+                                if p['name'] or p['phone']:
+                                    ui.label(f"👤 {p['name']} ({p['phone']})").classes('text-sm text-grey-8')
+                    
+                    if count == 0:
+                        ui.label('Ничего не найдено по вашему запросу').classes('text-grey text-center w-full q-mt-sm')
+
+            render_archive()
 
         # --- ВКЛАДКА 5: БАЗА КЛИЕНТОВ ---
         with ui.tab_panel(t5):
@@ -378,4 +402,4 @@ def driver_page():
                     if p['phone']:
                         ui.html(f'<a href="tel:{p["phone"]}"><button style="background:#25D366;color:white;border:none;border-radius:50%;width:45px;height:45px;font-size:20px;cursor:pointer;">📞</button></a>')
 
-ui.run(port=int(os.environ.get("PORT", 8080)), host='0.0.0.0', title="MN Transfer", storage_secret="MN_TRANSFER_PRO_KEY_999")
+ui.run(port=int(os.environ.get("PORT", 8080)), host='0.0.0.0', title="Transfer MN", storage_secret="MN_TRANSFER_PRO_KEY_999")
